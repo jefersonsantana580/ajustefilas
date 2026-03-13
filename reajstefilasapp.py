@@ -12,8 +12,6 @@ import streamlit as st
 st.set_page_config(page_title="Nivelamento de Filas - Mês a Mês", layout="wide")
 st.title("📊 Nivelamento de Filas (Cenários 1 e 2)")
 
-# ---- Banner embutido no topo direito ----
-BANNER_B64 = 
 
 st.markdown(
     """
