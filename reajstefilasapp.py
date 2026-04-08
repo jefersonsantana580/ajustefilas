@@ -185,6 +185,21 @@ if uploaded and st.button("🚀 Gerar Nivelamento"):
     df['NV DATA CENARIO 1'] = df.index.map(res_c1)
     df['NV DATA CENARIO 2'] = df.index.map(res_c2)
 
+
+    
+# =====================================================
+# Diferença de dias (variação)
+# =====================================================
+
+df['dif cen 1'] = (
+    df['NV DATA CENARIO 1'] - df['DATA PLANEJADA']
+).dt.days
+
+df['dif cen 2'] = (
+    df['NV DATA CENARIO 2'] - df['DATA PLANEJADA']
+).dt.days
+
+
     st.success("✅ Cenário 1 e Cenário 2 gerados corretamente")
     st.dataframe(df.head(50))
 
