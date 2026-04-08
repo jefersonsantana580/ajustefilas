@@ -110,30 +110,42 @@ def balancear_dia_por_modelo(df_pend, capacidade_dia):
 # =====================================================
 
 
+
 def aplicar_cenario1(df_mes, dias, capacidade):
+    """
+    Cenário 1 correto:
+    - FIFO por MODELO
+    - Antecipação mínima
+    - Nivelamento apenas quando necessário
+    """
     resultado = {}
 
-    filas_por_modelo = {
-        m: g.sort_values(['DATA PLANEJADA', 'NR_FILA']).index.tolist()
-        for m, g in df_mes.groupby('MODELO')
-    }
+    # Controle de ocupação por dia
+    ocupacao_dia = {d: 0 for d in dias}
 
-    modelos = list(filas_por_modelo.keys())
+    # Processa MODELO por MODELO
+    for modelo, grupo in df_mes.groupby('MODELO'):
+        filas = grupo.sort_values(['DATA PLANEJADA','NR_FILA'])
 
-    for d in dias:
-        usados = 0
-        giro = 0
+        for idx, row in filas.iterrows():
+            d = row['DATA PLANEJADA']
 
-        # Continua até preencher o dia ou esgotar tudo
-        while usados < capacidade and any(filas_por_modelo[m] for m in modelos):
-            m = modelos[giro % len(modelos)]
-            if filas_por_modelo[m]:
-                idx = filas_por_modelo[m].pop(0)
-                resultado[idx] = d
-                usados += 1
-            giro += 1
+            # Garante que a data está dentro do range do mês
+            if d not in ocupacao_dia:
+                d = max([x for x in dias if x <= d])
+
+            # Volta no calendário até achar vaga
+            while ocupacao_dia[d] >= capacidade:
+                prev_days = [x for x in dias if x < d]
+                if not prev_days:
+                    break
+                d = prev_days[-1]
+
+            resultado[idx] = d
+            ocupacao_dia[d] += 1
 
     return resultado
+
 
 
 # =====================================================
