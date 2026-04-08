@@ -40,7 +40,6 @@ feriados_text = st.sidebar.text_area(
     height=120
 )
 
-)
 
 uploaded = st.file_uploader("📥 Envie o Excel (aba Planilha1)", type=["xlsx"])
 
