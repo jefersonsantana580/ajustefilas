@@ -1,26 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-Nivelamento de Filas - Cenários 1 e 2
-Cenário 2 reutiliza o cálculo de balanceamento diário do app.py
-VERSÃO COM FILTROS DE DAILY RATE E FERIADOS
+Nivelamento de Filas - Cenários 1 e 2 (VERSÃO FINAL)
+Opção B:
+- Cenário 1: FIFO por MODELO com antecipação mínima
+- Cenário 2: FIFO global com balanceamento diário por MODELO
 Autor: M365 Copilot p/ Jeferson Santana
 """
 
 import io
-from datetime import timedelta
 import pandas as pd
 import streamlit as st
 
-# =======================================
+# =====================================================
 # Configuração da página
-# =======================================
+# =====================================================
 
-st.set_page_config(page_title="Nivelamento de Filas - Balanceado", layout="wide")
-st.title("📊 Nivelamento de Filas (Cenários 1 e 2 - Balanceamento Unificado)")
+st.set_page_config(page_title="Nivelamento de Filas", layout="wide")
+st.title("📊 Nivelamento de Filas – Cenários 1 e 2 (Balanceados)")
 
-# =======================================
-# Sidebar - Filtros (AGORA SEMPRE VISÍVEIS)
-# =======================================
+# =====================================================
+# Sidebar – Parâmetros
+# =====================================================
 
 st.sidebar.header("⚙️ Parâmetros")
 
@@ -32,116 +32,151 @@ capacidade_por_dia = st.sidebar.number_input(
     step=1
 )
 
-
 feriados_text = st.sidebar.text_area(
-    "Feriados (um por linha, formato AAAA-MM-DD)",
-    value="",
-    placeholder="Ex:\n2026-04-21\n2026-05-01",
+    "Feriados (um por linha – AAAA-MM-DD)",
+    placeholder="Ex:
+2026-04-21
+2026-05-01",
     height=120
-
 )
 
-# =======================================
-# Upload
-# =======================================
+uploaded = st.file_uploader("📥 Envie o Excel (aba Planilha1)", type=["xlsx"])
 
-uploaded = st.file_uploader("📥 Envie o arquivo Excel base (com a aba Planilha1)", type=["xlsx"])
+# =====================================================
+# Utilidades
+# =====================================================
 
-# =======================================
-# Utilidades de calendário (mesmo conceito do app.py)
-# =======================================
-
-def parse_holidays(text):
-    hs = set()
-    if not text:
-        return hs
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
+def parse_feriados(text):
+    out = set()
+    for ln in (text or '').splitlines():
+        ln = ln.strip()
+        if not ln:
             continue
         try:
-            hs.add(pd.to_datetime(line).normalize())
+            out.add(pd.to_datetime(ln).normalize())
         except Exception:
             pass
-    return hs
-
-
-def business_days_month(eom: pd.Timestamp, holidays: set):
-    first_day = eom.replace(day=1)
-    days = pd.date_range(first_day, eom, freq='D')
-    bdays = [d.normalize() for d in days if d.weekday() < 5]
-    if holidays:
-        bdays = [d for d in bdays if d not in holidays]
-    return bdays
-
-# =======================================
-# Núcleo de balanceamento (do app.py)
-# =======================================
-
-def distribuir_fifo(indices, dias_uteis, capacidade_por_dia):
-    """Distribuição FIFO respeitando capacidade diária (núcleo do app.py)"""
-    out = {}
-    p = 0
-    total = len(indices)
-
-    for d in dias_uteis:
-        for _ in range(capacidade_por_dia):
-            if p >= total:
-                break
-            out[indices[p]] = d
-            p += 1
-        if p >= total:
-            break
     return out
 
-# =======================================
-# Cenário 2 (balanceado)
-# =======================================
 
-def cenario2_balanceado(df_month, days, capacidade_por_dia):
-    order = (
-        df_month
-        .sort_values(['DATA PLANEJADA', 'NR_FILA'])
-        .index.tolist()
+def dias_uteis_mes(datas, feriados):
+    first = datas.min().replace(day=1)
+    last = datas.max()
+    dias = pd.date_range(first, last, freq='D')
+    dias = [d.normalize() for d in dias if d.weekday() < 5 and d.normalize() not in feriados]
+    return dias
+
+# =====================================================
+# Núcleo de balanceamento diário por MODELO
+# =====================================================
+
+def balancear_dia_por_modelo(df_pend, capacidade_dia):
+    escolhidos = []
+
+    saldo = df_pend.groupby('MODELO').size().to_dict()
+    total = sum(saldo.values())
+    if total == 0:
+        return escolhidos
+
+    cotas = {m: int((q / total) * capacidade_dia) for m, q in saldo.items()}
+    usados = sum(cotas.values())
+    resto = capacidade_dia - usados
+
+    restos_ord = sorted(
+        saldo.keys(),
+        key=lambda m: ((saldo[m] / total) * capacidade_dia) - cotas[m],
+        reverse=True
     )
-    return distribuir_fifo(order, days, capacidade_por_dia)
 
-# =======================================
+    for m in restos_ord:
+        if resto <= 0:
+            break
+        cotas[m] += 1
+        resto -= 1
+
+    for modelo, qtd in cotas.items():
+        idxs = (
+            df_pend[df_pend['MODELO'] == modelo]
+            .sort_values(['DATA PLANEJADA', 'NR_FILA'])
+            .index.tolist()
+        )
+        escolhidos.extend(idxs[:qtd])
+
+    return escolhidos[:capacidade_dia]
+
+# =====================================================
+# Cenário 1 – FIFO por MODELO (antecipação mínima)
+# =====================================================
+
+def aplicar_cenario1(df_mes, dias, capacidade):
+    resultado = {}
+
+    grupos = {
+        m: g.sort_values(['DATA PLANEJADA','NR_FILA']).index.tolist()
+        for m, g in df_mes.groupby('MODELO')
+    }
+
+    pendentes = {m: lst.copy() for m, lst in grupos.items()}
+
+    for d in dias:
+        usados_dia = 0
+        for m in sorted(pendentes.keys()):
+            if usados_dia >= capacidade:
+                break
+            if pendentes[m]:
+                idx = pendentes[m].pop(0)
+                resultado[idx] = d
+                usados_dia += 1
+
+    return resultado
+
+# =====================================================
+# Cenário 2 – FIFO global + balanceamento por MODELO
+# =====================================================
+
+def aplicar_cenario2(df_mes, dias, capacidade):
+    resultado = {}
+    pend = df_mes.sort_values(['DATA PLANEJADA','NR_FILA']).copy()
+
+    for d in dias:
+        if pend.empty:
+            break
+        escolhidos = balancear_dia_por_modelo(pend, capacidade)
+        for idx in escolhidos:
+            resultado[idx] = d
+        pend = pend.drop(index=escolhidos)
+
+    return resultado
+
+# =====================================================
 # Execução
-# =======================================
+# =====================================================
 
-if uploaded is not None and st.button("🚀 Gerar Nivelamento"):
-    df = pd.read_excel(uploaded, sheet_name="Planilha1")
-
-    required = ['NR_FILA','DATA PLANEJADA','MODELO']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        st.error(f"Colunas obrigatórias ausentes: {', '.join(missing)}")
-        st.stop()
-
+if uploaded and st.button("🚀 Gerar Nivelamento"):
+    df = pd.read_excel(uploaded, sheet_name='Planilha1')
     df['DATA PLANEJADA'] = pd.to_datetime(df['DATA PLANEJADA']).dt.normalize()
-    feriados = parse_holidays(feriados_text)
+    feriados = parse_feriados(feriados_text)
 
-    resultados = {}
+    res_c1, res_c2 = {}, {}
 
     for mes, df_mes in df.groupby(df['DATA PLANEJADA'].dt.to_period('M')):
-        eom = df_mes['DATA PLANEJADA'].max()
-        days = business_days_month(eom, feriados)
-        aloc = cenario2_balanceado(df_mes, days, capacidade_por_dia)
-        resultados.update(aloc)
+        dias = dias_uteis_mes(df_mes['DATA PLANEJADA'], feriados)
+        res_c1.update(aplicar_cenario1(df_mes, dias, capacidade_por_dia))
+        res_c2.update(aplicar_cenario2(df_mes, dias, capacidade_por_dia))
 
-    df['NV DATA CENARIO 2'] = df.index.map(resultados)
+    df['NV DATA CENARIO 1'] = df.index.map(res_c1)
+    df['NV DATA CENARIO 2'] = df.index.map(res_c2)
 
-    st.success("✅ Cenário 2 gerado com filtros de Daily Rate e Feriados")
+    st.success("✅ Cenário 1 e Cenário 2 gerados corretamente")
     st.dataframe(df.head(50))
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name="RESULTADO")
+        df.to_excel(writer, index=False, sheet_name='RESULTADO')
 
     st.download_button(
         "📥 Baixar Excel",
         data=output.getvalue(),
-        file_name="nivelamento_balanceado.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        file_name='nivelamento_final_opcaoB.xlsx',
+        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
