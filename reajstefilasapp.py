@@ -32,13 +32,13 @@ capacidade_por_dia = st.sidebar.number_input(
     step=1
 )
 
+
 feriados_text = st.sidebar.text_area(
     "Feriados (um por linha, formato AAAA-MM-DD)",
     value="",
-    placeholder="Ex:
-2026-04-21
-2026-05-01",
+    placeholder="Ex:\n2026-04-21\n2026-05-01",
     height=120
+
 )
 
 # =======================================
