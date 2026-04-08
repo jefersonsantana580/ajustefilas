@@ -109,27 +109,32 @@ def balancear_dia_por_modelo(df_pend, capacidade_dia):
 # Cenário 1 – FIFO por MODELO (antecipação mínima)
 # =====================================================
 
+
 def aplicar_cenario1(df_mes, dias, capacidade):
     resultado = {}
 
-    grupos = {
-        m: g.sort_values(['DATA PLANEJADA','NR_FILA']).index.tolist()
+    filas_por_modelo = {
+        m: g.sort_values(['DATA PLANEJADA', 'NR_FILA']).index.tolist()
         for m, g in df_mes.groupby('MODELO')
     }
 
-    pendentes = {m: lst.copy() for m, lst in grupos.items()}
+    modelos = list(filas_por_modelo.keys())
 
     for d in dias:
-        usados_dia = 0
-        for m in sorted(pendentes.keys()):
-            if usados_dia >= capacidade:
-                break
-            if pendentes[m]:
-                idx = pendentes[m].pop(0)
+        usados = 0
+        giro = 0
+
+        # Continua até preencher o dia ou esgotar tudo
+        while usados < capacidade and any(filas_por_modelo[m] for m in modelos):
+            m = modelos[giro % len(modelos)]
+            if filas_por_modelo[m]:
+                idx = filas_por_modelo[m].pop(0)
                 resultado[idx] = d
-                usados_dia += 1
+                usados += 1
+            giro += 1
 
     return resultado
+
 
 # =====================================================
 # Cenário 2 – FIFO global + balanceamento por MODELO
