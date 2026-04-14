@@ -97,9 +97,10 @@ def dias_uteis_mes(datas, feriados):
     ]
     return dias
 
+
 def ajustar_para_dia_util(data, dias):
     """
-    mês.
+    Ajusta a data para um dia útil válido do mês.
     Regras:
     - se a data já for dia útil válido, mantém;
     - se cair em feriado/fim de semana, empurra para o próximo dia útil;
@@ -127,6 +128,7 @@ def ajustar_para_dia_util(data, dias):
         return anteriores[-1]
 
     return pd.NaT
+
 
 
 def encontrar_coluna_mes(df):
@@ -261,15 +263,14 @@ def balancear_dia_por_modelo(df_pend, capacidade_dia):
 # =====================================================
 
 
-
 def aplicar_cenario1(df_mes, dias, capacidade):
     """
     Cenário 1:
     - FIFO por MODELO
-    - antecipação mínima
+    - antecipação mínima como regra principal
     - usa a capacidade diária como meta
-    - trata datas planejadas em feriado/fim de semana
-    - evita deixar linhas sem data por causa de ponteiro preso
+    - trata feriado/fim de semana
+    - faz segunda passada para não deixar datas vazias
     """
 
     resultado = {}
@@ -277,9 +278,9 @@ def aplicar_cenario1(df_mes, dias, capacidade):
     if not dias:
         return resultado
 
-    dias = [pd.to_datetime(d).normalize() for d in dias]
+    dias = sorted(pd.to_datetime(d).normalize() for d in dias)
 
-    # Cria uma data de referência válida para o cenário 1
+    # Data de referência válida para o C1
     df_trab = df_mes.copy()
     df_trab["DATA_REFERENCIA_C1"] = df_trab["DATA PLANEJADA"].apply(
         lambda x: ajustar_para_dia_util(x, dias)
@@ -287,16 +288,18 @@ def aplicar_cenario1(df_mes, dias, capacidade):
 
     # Filas por modelo em FIFO
     filas_modelo = {}
-    for modelo, grupo in df_trab.groupby("MODELO"):
+    for modelo, grupo in df_trab.groupby("MODELO", sort=False):
         filas = grupo.sort_values(["DATA_REFERENCIA_C1", "NR_FILA"]).copy()
         filas_modelo[modelo] = filas.index.tolist()
 
     ponteiro_modelo = {modelo: 0 for modelo in filas_modelo.keys()}
+    ultimo_dia_modelo = {modelo: None for modelo in filas_modelo.keys()}
+    ocupacao = {d: 0 for d in dias}
 
     def proximo_item_modelo(modelo):
         """
         Retorna o próximo item válido do modelo.
-        Se encontrar linha com DATA_REFERENCIA_C1 inválida, avança o ponteiro.
+        Se achar linha com data inválida, avança o ponteiro.
         """
         idxs = filas_modelo[modelo]
         pos = ponteiro_modelo[modelo]
@@ -310,21 +313,21 @@ def aplicar_cenario1(df_mes, dias, capacidade):
                 return {
                     "idx": idx,
                     "modelo": modelo,
-                    "data_planejada": data_ref.normalize(),
+                    "data_ref": data_ref.normalize(),
                     "nr_fila": row["NR_FILA"]
                 }
 
-            # se a data for inválida, pula para a próxima linha do mesmo modelo
             pos += 1
             ponteiro_modelo[modelo] = pos
 
         return None
 
-    # Preenche dia a dia
+    # =====================================================
+    # 1ª passada:
+    # tenta preencher dia a dia só com antecipação/manutenção
+    # =====================================================
     for dia in dias:
-        alocados_no_dia = 0
-
-        while alocados_no_dia < capacidade:
+        while ocupacao[dia] < capacidade:
             candidatos = []
 
             for modelo in filas_modelo.keys():
@@ -332,30 +335,67 @@ def aplicar_cenario1(df_mes, dias, capacidade):
                 if item is None:
                     continue
 
-                # só pode antecipar ou manter
-                if item["data_planejada"] >= dia:
+                # regra principal: só pode antecipar ou manter
+                if item["data_ref"] >= dia:
                     candidatos.append(item)
 
-            # não há mais ninguém elegível para este dia
             if not candidatos:
                 break
 
-            # prioridade:
-            # 1) menor antecipação possível -> menor DATA_REFERENCIA_C1 >= dia
-            # 2) menor NR_FILA
-            # 3) nome do modelo como critério estável
+            # menor antecipação possível
             candidatos = sorted(
                 candidatos,
-                key=lambda x: (x["data_planejada"], x["nr_fila"], str(x["modelo"]))
+                key=lambda x: (x["data_ref"], x["nr_fila"], str(x["modelo"]))
             )
 
             escolhido = candidatos[0]
 
             resultado[escolhido["idx"]] = dia
-            alocados_no_dia += 1
-
-            # avança o ponteiro do modelo escolhido
+            ocupacao[dia] += 1
             ponteiro_modelo[escolhido["modelo"]] += 1
+            ultimo_dia_modelo[escolhido["modelo"]] = dia
+
+    # =====================================================
+    # 2ª passada:
+    # aloca o que sobrou para não deixar vazios
+    # =====================================================
+    for modelo, idxs in filas_modelo.items():
+        pos = ponteiro_modelo[modelo]
+
+        while pos < len(idxs):
+            idx = idxs[pos]
+
+            data_ref = pd.to_datetime(df_trab.loc[idx, "DATA_REFERENCIA_C1"], errors="coerce")
+            if pd.isna(data_ref):
+                data_ref = dias[0]
+            else:
+                data_ref = data_ref.normalize()
+
+            # para manter FIFO dentro do modelo,
+            # a próxima linha não pode cair antes da anterior do mesmo modelo
+            dia_minimo = data_ref
+            if ultimo_dia_modelo[modelo] is not None and dia_minimo < ultimo_dia_modelo[modelo]:
+                dia_minimo = ultimo_dia_modelo[modelo]
+
+            # tenta alocar do dia_minimo para frente
+            candidatos = [d for d in dias if d >= dia_minimo and ocupacao[d] < capacidade]
+
+            # fallback extra: qualquer vaga livre do mês
+            if not candidatos:
+                candidatos = [d for d in dias if ocupacao[d] < capacidade]
+
+            # se não há vaga em nenhum dia, para
+            if not candidatos:
+                break
+
+            dia_escolhido = candidatos[0]
+
+            resultado[idx] = dia_escolhido
+            ocupacao[dia_escolhido] += 1
+            ultimo_dia_modelo[modelo] = dia_escolhido
+
+            pos += 1
+            ponteiro_modelo[modelo] = pos
 
     return resultado
 
