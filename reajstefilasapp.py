@@ -48,7 +48,7 @@ uploaded = st.file_uploader("📥 Envie o Excel (aba Planilha1)", type=["xlsx"])
 
 def parse_feriados(text):
     out = set()
-    for ln in (text or '').splitlines():
+    for ln in (text or "").splitlines():
         ln = ln.strip()
         if not ln:
             continue
@@ -60,10 +60,19 @@ def parse_feriados(text):
 
 
 def dias_uteis_mes(datas, feriados):
-    first = datas.min().replace(day=1)
-    last = datas.max()
-    dias = pd.date_range(first, last, freq='D')
-    dias = [d.normalize() for d in dias if d.weekday() < 5 and d.normalize() not in feriados]
+    datas_validas = pd.to_datetime(datas, errors="coerce").dropna()
+    if datas_validas.empty:
+        return []
+
+    first = datas_validas.min().replace(day=1)
+    last = datas_validas.max()
+
+    dias = pd.date_range(first, last, freq="D")
+    dias = [
+        d.normalize()
+        for d in dias
+        if d.weekday() < 5 and d.normalize() not in feriados
+    ]
     return dias
 
 
@@ -91,8 +100,9 @@ def encontrar_coluna_mes(df):
 def balancear_dia_por_modelo(df_pend, capacidade_dia):
     escolhidos = []
 
-    saldo = df_pend.groupby('MODELO').size().to_dict()
+    saldo = df_pend.groupby("MODELO").size().to_dict()
     total = sum(saldo.values())
+
     if total == 0:
         return escolhidos
 
@@ -114,8 +124,8 @@ def balancear_dia_por_modelo(df_pend, capacidade_dia):
 
     for modelo, qtd in cotas.items():
         idxs = (
-            df_pend[df_pend['MODELO'] == modelo]
-            .sort_values(['DATA PLANEJADA', 'NR_FILA'])
+            df_pend[df_pend["MODELO"] == modelo]
+            .sort_values(["DATA PLANEJADA", "NR_FILA"])
             .index.tolist()
         )
         escolhidos.extend(idxs[:qtd])
@@ -135,14 +145,18 @@ def aplicar_cenario1(df_mes, dias, capacidade):
     """
     resultado = {}
 
+    if not dias:
+        return resultado
+
     ocupacao_dia = {d: 0 for d in dias}
 
-    for modelo, grupo in df_mes.groupby('MODELO'):
-        filas = grupo.sort_values(['DATA PLANEJADA', 'NR_FILA'])
+    for modelo, grupo in df_mes.groupby("MODELO"):
+        filas = grupo.sort_values(["DATA PLANEJADA", "NR_FILA"])
 
         for idx, row in filas.iterrows():
-            d = row['DATA PLANEJADA']
+            d = row["DATA PLANEJADA"]
 
+            # Se a data não estiver dentro do range de dias úteis, ajusta
             if d not in ocupacao_dia:
                 dias_validos = [x for x in dias if x <= d]
                 if dias_validos:
@@ -150,6 +164,7 @@ def aplicar_cenario1(df_mes, dias, capacidade):
                 else:
                     d = dias[0]
 
+            # Enquanto estiver cheio, volta para o dia útil anterior
             while ocupacao_dia[d] >= capacidade:
                 prev_days = [x for x in dias if x < d]
                 if not prev_days:
@@ -167,51 +182,65 @@ def aplicar_cenario1(df_mes, dias, capacidade):
 
 def aplicar_cenario2(df_mes, dias, capacidade):
     resultado = {}
-    pend = df_mes.sort_values(['DATA PLANEJADA', 'NR_FILA']).copy()
+
+    if not dias:
+        return resultado
+
+    pend = df_mes.sort_values(["DATA PLANEJADA", "NR_FILA"]).copy()
 
     for d in dias:
         if pend.empty:
             break
+
         escolhidos = balancear_dia_por_modelo(pend, capacidade)
+
         for idx in escolhidos:
             resultado[idx] = d
+
         pend = pend.drop(index=escolhidos)
 
     return resultado
 
 # =====================================================
-# Execução
+# Botão de geração
 # =====================================================
 
 if uploaded and st.button("🚀 Gerar Nivelamento"):
-    df = pd.read_excel(uploaded, sheet_name='Planilha1', engine='openpyxl')
+    df = pd.read_excel(uploaded, sheet_name="Planilha1", engine="openpyxl")
 
-    # Garantir DATA PLANEJADA como datetime sem hora
-    df['DATA PLANEJADA'] = pd.to_datetime(df['DATA PLANEJADA'], errors='coerce').dt.normalize()
-
-    # Identificar coluna MES OFFLINE
+    # Identifica a coluna de mês offline
     col_mes_offline = encontrar_coluna_mes(df)
-
     if col_mes_offline is None:
         st.error("❌ Não encontrei a coluna 'MES OFFLINE' no arquivo. Verifique o nome da coluna.")
         st.stop()
 
-    # Garantir MES OFFLINE como datetime
-    df[col_mes_offline] = pd.to_datetime(df[col_mes_offline], errors='coerce')
+    # Converte colunas de data
+    df["DATA PLANEJADA"] = pd.to_datetime(df["DATA PLANEJADA"], errors="coerce").dt.normalize()
+    df[col_mes_offline] = pd.to_datetime(df[col_mes_offline], errors="coerce")
+
+    # Validação mínima
+    if df["DATA PLANEJADA"].isna().all():
+        st.error("❌ A coluna 'DATA PLANEJADA' não possui datas válidas.")
+        st.stop()
 
     feriados = parse_feriados(feriados_text)
 
     res_c1, res_c2 = {}, {}
 
-    for mes, df_mes in df.groupby(df['DATA PLANEJADA'].dt.to_period('M')):
-        dias = dias_uteis_mes(df_mes['DATA PLANEJADA'], feriados)
+    # Continua nivelando por mês da DATA PLANEJADA
+    for mes, df_mes in df.groupby(df["DATA PLANEJADA"].dt.to_period("M")):
+        dias = dias_uteis_mes(df_mes["DATA PLANEJADA"], feriados)
+
+        if not dias:
+            continue
+
         res_c1.update(aplicar_cenario1(df_mes, dias, capacidade_por_dia))
         res_c2.update(aplicar_cenario2(df_mes, dias, capacidade_por_dia))
 
-    df['NV DATA CENARIO 1'] = pd.to_datetime(df.index.map(res_c1), errors='coerce')
-    df['NV DATA CENARIO 2'] = pd.to_datetime(df.index.map(res_c2), errors='coerce')
+    df["NV DATA CENARIO 1"] = pd.to_datetime(df.index.map(res_c1), errors="coerce")
+    df["NV DATA CENARIO 2"] = pd.to_datetime(df.index.map(res_c2), errors="coerce")
 
-    # Salva no session_state para manter ao trocar o filtro
+    # Salva o resultado para não perder ao alterar o filtro
     st.session_state["df_resultado"] = df.copy()
     st.session_state["col_mes_offline"] = col_mes_offline
 
@@ -225,10 +254,13 @@ if "df_resultado" in st.session_state:
     df_resultado = st.session_state["df_resultado"].copy()
     col_mes_offline = st.session_state["col_mes_offline"]
 
-    st.subheader("🔎 Filtro por mês")
+    # Garante datetime
+    df_resultado[col_mes_offline] = pd.to_datetime(df_resultado[col_mes_offline], errors="coerce")
+    df_resultado["DATA PLANEJADA"] = pd.to_datetime(df_resultado["DATA PLANEJADA"], errors="coerce")
+    df_resultado["NV DATA CENARIO 1"] = pd.to_datetime(df_resultado["NV DATA CENARIO 1"], errors="coerce")
+    df_resultado["NV DATA CENARIO 2"] = pd.to_datetime(df_resultado["NV DATA CENARIO 2"], errors="coerce")
 
-    # Garantir datetime
-    df_resultado[col_mes_offline] = pd.to_datetime(df_resultado[col_mes_offline], errors='coerce')
+    st.subheader("🔎 Filtro por mês")
 
     meses_disponiveis = (
         df_resultado[col_mes_offline]
@@ -257,51 +289,66 @@ if "df_resultado" in st.session_state:
             df_filtrado[col_mes_offline].dt.to_period("M") == periodo
         ].copy()
 
-    # -----------------------------
-    # Formatação só para exibição
-    # -----------------------------
+    # =====================================================
+    # Indicadores rápidos
+    # =====================================================
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total de filas", len(df_filtrado))
+    c2.metric("Modelos únicos", df_filtrado["MODELO"].nunique() if "MODELO" in df_filtrado.columns else 0)
+    c3.metric("Capacidade por dia", capacidade_por_dia)
+
+    # =====================================================
+    # Formatação somente para exibição
+    # =====================================================
+
     df_view = df_filtrado.copy()
 
-    # MES OFFLINE como MM/AAAA
+    # MES OFFLINE como MM/YYYY
     if col_mes_offline in df_view.columns:
         df_view[col_mes_offline] = pd.to_datetime(
-            df_view[col_mes_offline], errors='coerce'
+            df_view[col_mes_offline], errors="coerce"
         ).dt.strftime("%m/%Y")
 
-    # DATA PLANEJADA e cenários sem hora
-    colunas_data = ['DATA PLANEJADA', 'NV DATA CENARIO 1', 'NV DATA CENARIO 2']
+    # Demais datas sem hora
+    colunas_data = ["DATA PLANEJADA", "NV DATA CENARIO 1", "NV DATA CENARIO 2"]
     for col in colunas_data:
         if col in df_view.columns:
-            df_view[col] = pd.to_datetime(df_view[col], errors='coerce').dt.strftime("%d/%m/%Y")
+            df_view[col] = pd.to_datetime(
+                df_view[col], errors="coerce"
+            ).dt.strftime("%d/%m/%Y")
 
     df_view = df_view.fillna("")
 
     st.dataframe(df_view, use_container_width=True, hide_index=True)
 
     # =====================================================
-    # Download Excel
+    # Download do Excel
     # =====================================================
-    # Aqui você escolhe se quer baixar o filtrado ou o completo:
-    # - para baixar o filtrado: use df_filtrado
-    # - para baixar o completo: use df_resultado
 
-    df_download = df_filtrado.copy()   # <- troque para df_resultado se quiser baixar tudo
+    # Se quiser baixar apenas o filtrado, mantenha df_filtrado.
+    # Se quiser baixar o resultado completo sempre, troque por df_resultado.
+    df_download = df_filtrado.copy()
 
-    # Se quiser também sem hora no Excel:
     if col_mes_offline in df_download.columns:
-        df_download[col_mes_offline] = pd.to_datetime(df_download[col_mes_offline], errors='coerce').dt.date
+        df_download[col_mes_offline] = pd.to_datetime(
+            df_download[col_mes_offline], errors="coerce"
+        ).dt.date
 
-    for col in ['DATA PLANEJADA', 'NV DATA CENARIO 1', 'NV DATA CENARIO 2']:
+    for col in ["DATA PLANEJADA", "NV DATA CENARIO 1", "NV DATA CENARIO 2"]:
         if col in df_download.columns:
-            df_download[col] = pd.to_datetime(df_download[col], errors='coerce').dt.date
+            df_download[col] = pd.to_datetime(
+                df_download[col], errors="coerce"
+            ).dt.date
 
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_download.to_excel(writer, index=False, sheet_name='RESULTADO')
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_download.to_excel(writer, index=False, sheet_name="RESULTADO")
 
     st.download_button(
         "📥 Baixar Excel",
         data=output.getvalue(),
-        file_name='nivelamento_final_opcaoB.xlsx',
-        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        file_name="nivelamento_final_opcaoB.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
