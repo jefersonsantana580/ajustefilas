@@ -261,7 +261,9 @@ def balancear_dia_por_modelo(df_pend, capacidade_dia):
 # =====================================================
 
 
-def aplicar_cenario1(df_mes, dias, capacidade):def aplicar_cenario1(df_mes    """
+
+ef aplicar_cenario1(df_mes, dias, capacidade):
+    """
     Cenário 1:
     - FIFO por MODELO
     - antecipação mínima
@@ -356,7 +358,6 @@ def aplicar_cenario1(df_mes, dias, capacidade):def aplicar_cenario1(df_mes    ""
             ponteiro_modelo[escolhido["modelo"]] += 1
 
     return resultado
-
 
 
 # =====================================================
