@@ -1,8 +1,6 @@
-
 # -*- coding: utf-8 -*-
 """
-Nivelamento de Filas - Cenários 1, 2 e 3 (VERSÃO FINAL)
-Opção B + Cenário 3 Inteligente:
+Nivelamento de Filas - Cenários 1, 2 e 3
 - Cenário 1: FIFO por MODELO com antecipação mínima
 - Cenário 2: FIFO global com balanceamento diário por MODELO
 - Cenário 3: Modelos leves ficam próximos da DATA PLANEJADA,
@@ -22,7 +20,14 @@ st.set_page_config(page_title="Nivelamento de Filas", layout="wide")
 st.title("📊 Nivelamento de Filas – Cenários 1, 2 e 3")
 
 # =====================================================
-# Sidebar – Parâmetros
+# Parâmetros fixos internos
+# =====================================================
+
+# O usuário não precisa ver isso na tela
+JANELA_ESPALHAMENTO_C3 = 2
+
+# =====================================================
+# Sidebar – Parâmetros visíveis
 # =====================================================
 
 st.sidebar.header("⚙️ Parâmetros")
@@ -35,25 +40,11 @@ capacidade_por_dia = st.sidebar.number_input(
     step=1
 )
 
-janela_espalhamento = st.sidebar.number_input(
-    "Janela de espalhamento do Cenário 3 (dias úteis)",
-    min_value=0,
-    max_value=10,
-    value=2,
-    step=1,
-    help="Para modelos leves, tenta espalhar as filas para dias úteis próximos da DATA PLANEJADA."
-)
-
 feriados_text = st.sidebar.text_area(
     "Feriados (um por linha, formato AAAA-MM-DD)",
     value="",
     placeholder="Ex:\n2026-04-21\n2026-05-01",
     height=120
-)
-
-baixar_apenas_filtrado = st.sidebar.checkbox(
-    "Baixar apenas o resultado filtrado",
-    value=True
 )
 
 uploaded = st.file_uploader("📥 Envie o Excel (aba Planilha1)", type=["xlsx"])
@@ -171,6 +162,32 @@ def calcular_desvio_dias(data_nova, data_original):
     return (pd.to_datetime(data_nova).normalize() - pd.to_datetime(data_original).normalize()).days
 
 
+def garantir_colunas_resultado(df):
+    """
+    Garante que as colunas dos cenários existam,
+    evitando erro quando houver session_state antigo.
+    """
+    colunas_data = [
+        "NV DATA CENARIO 1",
+        "NV DATA CENARIO 2",
+        "NV DATA CENARIO 3",
+    ]
+    colunas_desvio = [
+        "CENARIO 1 - DT PLANEJADA",
+        "CENARIO 2 - DT PLANEJADA",
+        "CENARIO 3 - DT PLANEJADA",
+    ]
+
+    for col in colunas_data:
+        if col not in df.columns:
+            df[col] = pd.NaT
+
+    for col in colunas_desvio:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    return df
+
 # =====================================================
 # Núcleo de balanceamento diário por MODELO
 # =====================================================
@@ -181,7 +198,7 @@ def balancear_dia_por_modelo(df_pend, capacidade_dia):
     saldo = df_pend.groupby("MODELO").size().to_dict()
     total = sum(saldo.values())
 
-    if total == 0:
+    if total == 0 or capacidade_dia <= 0:
         return escolhidos
 
     cotas = {m: int((q / total) * capacidade_dia) for m, q in saldo.items()}
@@ -239,7 +256,6 @@ def aplicar_cenario1(df_mes, dias, capacidade):
 
             d = pd.to_datetime(d).normalize()
 
-            # Se a data não estiver no range do mês, ajusta para o último dia útil <= data
             if d not in ocupacao_dia:
                 dias_validos = [x for x in dias if x <= d]
                 if dias_validos:
@@ -247,7 +263,6 @@ def aplicar_cenario1(df_mes, dias, capacidade):
                 else:
                     d = dias[0]
 
-            # Volta até encontrar vaga
             while ocupacao_dia[d] >= capacidade:
                 prev_days = [x for x in dias if x < d]
                 if not prev_days:
@@ -302,7 +317,7 @@ def escolher_dia_proximo_espalhado(
     - tenta espalhar o mesmo MODELO em dias diferentes
     - mantém a data o mais próximo possível da DATA PLANEJADA
     - respeita a capacidade diária
-    - em empate, prefere não antecipar demais
+    - em empate, prefere o mesmo dia ou posterior
     """
     if pd.isna(data_alvo):
         return None
@@ -314,7 +329,6 @@ def escolher_dia_proximo_espalhado(
     if not dias_livres:
         return None
 
-    # primeiro tenta dentro da janela de dias úteis
     candidatos_janela = [
         d for d in dias_livres
         if distancia_em_dias_uteis(data_alvo, d, ordem_dias) <= janela
@@ -325,11 +339,11 @@ def escolher_dia_proximo_espalhado(
     melhor_dia = min(
         candidatos,
         key=lambda d: (
-            1 if uso_modelo_dia.get((modelo, d), 0) > 0 else 0,   # evitar repetir o mesmo modelo no mesmo dia
-            distancia_em_dias_uteis(data_alvo, d, ordem_dias),   # manter próximo
-            ocupacao[d],                                          # preferir dia menos carregado
-            0 if d >= data_alvo else 1,                           # em empate, prefere mesmo dia ou posterior
-            abs((d - data_alvo).days)                             # critério final de desempate
+            1 if uso_modelo_dia.get((modelo, d), 0) > 0 else 0,
+            distancia_em_dias_uteis(data_alvo, d, ordem_dias),
+            ocupacao[d],
+            0 if d >= data_alvo else 1,
+            abs((d - data_alvo).days)
         )
     )
 
@@ -366,13 +380,10 @@ def aplicar_cenario3(df_mes, dias, capacidade, janela_espalhamento=2):
     df_leves = df_mes[df_mes["MODELO"].isin(modelos_leves)].copy()
     df_pesados = df_mes[~df_mes["MODELO"].isin(modelos_leves)].copy()
 
-    # Ordenação FIFO
     df_leves = df_leves.sort_values(["DATA PLANEJADA", "NR_FILA"])
     df_pesados = df_pesados.sort_values(["DATA PLANEJADA", "NR_FILA"])
 
-    # -------------------------------------------------
-    # 1) Alocar modelos leves de forma espalhada/próxima
-    # -------------------------------------------------
+    # 1) Aloca modelos leves próximos da data, espalhando se necessário
     for idx, row in df_leves.iterrows():
         modelo = row["MODELO"]
         data_original = pd.to_datetime(row["DATA PLANEJADA"], errors="coerce")
@@ -400,9 +411,7 @@ def aplicar_cenario3(df_mes, dias, capacidade, janela_espalhamento=2):
                     f"{melhor_dia.strftime('%d/%m/%Y')} para reduzir acúmulo e manter proximidade."
                 )
 
-    # -------------------------------------------------
-    # 2) Alocar modelos pesados nas vagas restantes
-    # -------------------------------------------------
+    # 2) Aloca modelos pesados nas vagas restantes
     pend = df_pesados.copy()
 
     for d in dias:
@@ -432,6 +441,11 @@ def aplicar_cenario3(df_mes, dias, capacidade, janela_espalhamento=2):
 
 if uploaded and st.button("🚀 Gerar Nivelamento"):
     df = pd.read_excel(uploaded, sheet_name="Planilha1", engine="openpyxl")
+
+    # Limpa resultados anteriores para evitar conflito de session_state antigo
+    st.session_state.pop("df_resultado", None)
+    st.session_state.pop("col_mes_offline", None)
+    st.session_state.pop("alertas_c3", None)
 
     # Valida colunas mínimas
     colunas_obrigatorias = ["DATA PLANEJADA", "MODELO", "NR_FILA"]
@@ -474,17 +488,20 @@ if uploaded and st.button("🚀 Gerar Nivelamento"):
             df_mes=df_mes,
             dias=dias,
             capacidade=capacidade_por_dia,
-            janela_espalhamento=janela_espalhamento
+            janela_espalhamento=JANELA_ESPALHAMENTO_C3
         )
         res_c3.update(res_mes_c3)
         alertas_c3.extend(alertas_mes_c3)
+
+    # Garante colunas antes de preencher
+    df = garantir_colunas_resultado(df)
 
     # Colunas de resultado
     df["NV DATA CENARIO 1"] = pd.to_datetime(df.index.map(res_c1), errors="coerce")
     df["NV DATA CENARIO 2"] = pd.to_datetime(df.index.map(res_c2), errors="coerce")
     df["NV DATA CENARIO 3"] = pd.to_datetime(df.index.map(res_c3), errors="coerce")
 
-    # Desvio em dias em relação à DATA PLANEJADA
+    # Colunas de desvio
     df["CENARIO 1 - DT PLANEJADA"] = df.apply(
         lambda r: calcular_desvio_dias(r["NV DATA CENARIO 1"], r["DATA PLANEJADA"]),
         axis=1
@@ -498,7 +515,7 @@ if uploaded and st.button("🚀 Gerar Nivelamento"):
         axis=1
     )
 
-    # Salva para manter o resultado após alterar filtros
+    # Salva no estado
     st.session_state["df_resultado"] = df.copy()
     st.session_state["col_mes_offline"] = col_mes_offline
     st.session_state["alertas_c3"] = alertas_c3
@@ -511,28 +528,33 @@ if uploaded and st.button("🚀 Gerar Nivelamento"):
 
 if "df_resultado" in st.session_state:
     df_resultado = st.session_state["df_resultado"].copy()
-    col_mes_offline = st.session_state["col_mes_offline"]
+    col_mes_offline = st.session_state.get("col_mes_offline")
 
-    # Garantir datetime
+    # Se não tiver coluna de mês, não tenta exibir filtro
+    if col_mes_offline is None or col_mes_offline not in df_resultado.columns:
+        st.warning("⚠️ Resultado disponível, mas a coluna de mês offline não foi encontrada.")
+        st.stop()
+
+    # Garante colunas de resultado para evitar KeyError
+    df_resultado = garantir_colunas_resultado(df_resultado)
+
+    # Converte datas com segurança
     df_resultado[col_mes_offline] = pd.to_datetime(df_resultado[col_mes_offline], errors="coerce")
-    df_resultado["DATA PLANEJADA"] = pd.to_datetime(df_resultado["DATA PLANEJADA"], errors="coerce")
-    df_resultado["NV DATA CENARIO 1"] = pd.to_datetime(df_resultado["NV DATA CENARIO 1"], errors="coerce")
-    df_resultado["NV DATA CENARIO 2"] = pd.to_datetime(df_resultado["NV DATA CENARIO 2"], errors="coerce")
-    df_resultado["NV DATA CENARIO 3"] = pd.to_datetime(df_resultado["NV DATA CENARIO 3"], errors="coerce")
 
-    st.subheader("🔎 Filtros")
+    for col in ["DATA PLANEJADA", "NV DATA CENARIO 1", "NV DATA CENARIO 2", "NV DATA CENARIO 3"]:
+        if col in df_resultado.columns:
+            df_resultado[col] = pd.to_datetime(df_resultado[col], errors="coerce")
 
-    # ----------------------------
-    # Filtro por mês (MES OFFLINE)
-    # ----------------------------
+    st.subheader("🔎 Filtro por mês")
+
     meses_disponiveis = (
         df_resultado[col_mes_offline]
         .dropna()
         .dt.to_period("M")
         .drop_duplicates()
     )
-    meses_disponiveis = ordenar_periodos(meses_disponiveis)
 
+    meses_disponiveis = ordenar_periodos(meses_disponiveis)
     opcoes_mes = ["Todos"] + [periodo_para_texto(m) for m in meses_disponiveis]
 
     mes_selecionado = st.selectbox(
@@ -553,11 +575,10 @@ if "df_resultado" in st.session_state:
     # Indicadores rápidos
     # =====================================================
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Total de filas", len(df_filtrado))
     c2.metric("Modelos únicos", df_filtrado["MODELO"].nunique() if "MODELO" in df_filtrado.columns else 0)
     c3.metric("Capacidade por dia", capacidade_por_dia)
-    c4.metric("Janela C3", janela_espalhamento)
 
     # =====================================================
     # Alertas do Cenário 3
@@ -600,15 +621,11 @@ if "df_resultado" in st.session_state:
     st.dataframe(df_view, use_container_width=True, hide_index=True)
 
     # =====================================================
-    # Download Excel
+    # Download do resultado completo
     # =====================================================
 
-    if baixar_apenas_filtrado:
-        df_download = df_filtrado.copy()
-    else:
-        df_download = df_resultado.copy()
+    df_download = df_resultado.copy()
 
-    # Sem hora no Excel
     if col_mes_offline in df_download.columns:
         df_download[col_mes_offline] = pd.to_datetime(
             df_download[col_mes_offline], errors="coerce"
