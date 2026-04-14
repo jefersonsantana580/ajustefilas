@@ -267,10 +267,10 @@ def aplicar_cenario1(df_mes, dias, capacidade):
     """
     Cenário 1:
     - FIFO por MODELO
-    - antecipação mínima como regra principal
-    - usa a capacidade diária como meta
+    - preserva a DATA PLANEJADA original sempre que houver capacidade
+    - se o dia estiver cheio, antecipa para o dia útil anterior mais próximo
     - trata feriado/fim de semana
-    - faz segunda passada para não deixar datas vazias
+    - evita datas vazias com fallback final
     """
 
     resultado = {}
@@ -279,125 +279,71 @@ def aplicar_cenario1(df_mes, dias, capacidade):
         return resultado
 
     dias = sorted(pd.to_datetime(d).normalize() for d in dias)
+    ocupacao = {d: 0 for d in dias}
 
-    # Data de referência válida para o C1
+    # Ajusta a data planejada para um dia útil válido
     df_trab = df_mes.copy()
     df_trab["DATA_REFERENCIA_C1"] = df_trab["DATA PLANEJADA"].apply(
         lambda x: ajustar_para_dia_util(x, dias)
     )
 
-    # Filas por modelo em FIFO
-    filas_modelo = {}
-    for modelo, grupo in df_trab.groupby("MODELO", sort=False):
-        filas = grupo.sort_values(["DATA_REFERENCIA_C1", "NR_FILA"]).copy()
-        filas_modelo[modelo] = filas.index.tolist()
+    # Ordena globalmente por data, mas preservando FIFO por modelo
+    df_trab = df_trab.sort_values(["MODELO", "DATA_REFERENCIA_C1", "NR_FILA"]).copy()
 
-    ponteiro_modelo = {modelo: 0 for modelo in filas_modelo.keys()}
-    ultimo_dia_modelo = {modelo: None for modelo in filas_modelo.keys()}
-    ocupacao = {d: 0 for d in dias}
+    # Guarda o último dia alocado por modelo para respeitar FIFO
+    ultimo_dia_modelo = {}
 
-    def proximo_item_modelo(modelo):
-        """
-        Retorna o próximo item válido do modelo.
-        Se achar linha com data inválida, avança o ponteiro.
-        """
-        idxs = filas_modelo[modelo]
-        pos = ponteiro_modelo[modelo]
+    for idx, row in df_trab.iterrows():
+        modelo = row["MODELO"]
+        data_ref = pd.to_datetime(row["DATA_REFERENCIA_C1"], errors="coerce")
 
-        while pos < len(idxs):
-            idx = idxs[pos]
-            row = df_trab.loc[idx]
+        if pd.isna(data_ref):
+            continue
 
-            data_ref = pd.to_datetime(row["DATA_REFERENCIA_C1"], errors="coerce")
-            if pd.notna(data_ref):
-                return {
-                    "idx": idx,
-                    "modelo": modelo,
-                    "data_ref": data_ref.normalize(),
-                    "nr_fila": row["NR_FILA"]
-                }
+        data_ref = data_ref.normalize()
 
-            pos += 1
-            ponteiro_modelo[modelo] = pos
+        # Limite mínimo para respeitar FIFO dentro do modelo
+        limite_inferior = ultimo_dia_modelo.get(modelo, dias[0])
 
-        return None
+        # -------------------------------------------------
+        # 1) tenta manter no próprio dia original
+        # -------------------------------------------------
+        if data_ref >= limite_inferior and ocupacao.get(data_ref, 0) < capacidade:
+            dia_escolhido = data_ref
 
-    # =====================================================
-    # 1ª passada:
-    # tenta preencher dia a dia só com antecipação/manutenção
-    # =====================================================
-    for dia in dias:
-        while ocupacao[dia] < capacidade:
-            candidatos = []
+        else:
+            # -------------------------------------------------
+            # 2) tenta antecipar o mínimo possível
+            #    procura o dia útil anterior mais próximo
+            # -------------------------------------------------
+            candidatos_anteriores = [
+                d for d in dias
+                if limite_inferior <= d <= data_ref and ocupacao[d] < capacidade
+            ]
 
-            for modelo in filas_modelo.keys():
-                item = proximo_item_modelo(modelo)
-                if item is None:
+            if candidatos_anteriores:
+                dia_escolhido = candidatos_anteriores[-1]  # mais próximo da data original
+            else:
+                # -------------------------------------------------
+                # 3) fallback de segurança: se não der para manter nem antecipar,
+                #    usa o próximo dia útil disponível >= limite_inferior
+                # -------------------------------------------------
+                candidatos_futuros = [
+                    d for d in dias
+                    if d >= limite_inferior and ocupacao[d] < capacidade
+                ]
+
+                if not candidatos_futuros:
                     continue
 
-                # regra principal: só pode antecipar ou manter
-                if item["data_ref"] >= dia:
-                    candidatos.append(item)
+                dia_escolhido = candidatos_futuros[0]
 
-            if not candidatos:
-                break
-
-            # menor antecipação possível
-            candidatos = sorted(
-                candidatos,
-                key=lambda x: (x["data_ref"], x["nr_fila"], str(x["modelo"]))
-            )
-
-            escolhido = candidatos[0]
-
-            resultado[escolhido["idx"]] = dia
-            ocupacao[dia] += 1
-            ponteiro_modelo[escolhido["modelo"]] += 1
-            ultimo_dia_modelo[escolhido["modelo"]] = dia
-
-    # =====================================================
-    # 2ª passada:
-    # aloca o que sobrou para não deixar vazios
-    # =====================================================
-    for modelo, idxs in filas_modelo.items():
-        pos = ponteiro_modelo[modelo]
-
-        while pos < len(idxs):
-            idx = idxs[pos]
-
-            data_ref = pd.to_datetime(df_trab.loc[idx, "DATA_REFERENCIA_C1"], errors="coerce")
-            if pd.isna(data_ref):
-                data_ref = dias[0]
-            else:
-                data_ref = data_ref.normalize()
-
-            # para manter FIFO dentro do modelo,
-            # a próxima linha não pode cair antes da anterior do mesmo modelo
-            dia_minimo = data_ref
-            if ultimo_dia_modelo[modelo] is not None and dia_minimo < ultimo_dia_modelo[modelo]:
-                dia_minimo = ultimo_dia_modelo[modelo]
-
-            # tenta alocar do dia_minimo para frente
-            candidatos = [d for d in dias if d >= dia_minimo and ocupacao[d] < capacidade]
-
-            # fallback extra: qualquer vaga livre do mês
-            if not candidatos:
-                candidatos = [d for d in dias if ocupacao[d] < capacidade]
-
-            # se não há vaga em nenhum dia, para
-            if not candidatos:
-                break
-
-            dia_escolhido = candidatos[0]
-
-            resultado[idx] = dia_escolhido
-            ocupacao[dia_escolhido] += 1
-            ultimo_dia_modelo[modelo] = dia_escolhido
-
-            pos += 1
-            ponteiro_modelo[modelo] = pos
+        resultado[idx] = dia_escolhido
+        ocupacao[dia_escolhido] += 1
+        ultimo_dia_modelo[modelo] = dia_escolhido
 
     return resultado
+
 
 
 # =====================================================
