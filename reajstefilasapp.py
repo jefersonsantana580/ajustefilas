@@ -262,7 +262,7 @@ def balancear_dia_por_modelo(df_pend, capacidade_dia):
 
 
 
-ef aplicar_cenario1(df_mes, dias, capacidade):
+def aplicar_cenario1(df_mes, dias, capacidade):
     """
     Cenário 1:
     - FIFO por MODELO
