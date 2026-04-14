@@ -231,20 +231,19 @@ def balancear_dia_por_modelo(df_pend, capacidade_dia):
 # =====================================================
 
 
-
 def aplicar_cenario1(df_mes, dias, capacidade):
     """
     Cenário 1:
     - FIFO por MODELO
     - antecipação mínima
-    - preenche os dias até a capacidade
-    - só antecipa (nunca joga para frente)
+    - usa a capacidade diária como meta de preenchimento
+    - preenche os dias desde o início do mês
 
-    Estratégia:
-    - processa os dias do mês de trás para frente
-    - para cada dia, escolhe linhas ainda não alocadas cuja DATA PLANEJADA >= dia
-    - preserva FIFO por MODELO
-    - minimiza antecipação
+    Regra:
+    - Em cada dia, só pode ser escolhido o PRIMEIRO item ainda não alocado de cada MODELO
+      (isso preserva o FIFO por MODELO)
+    - Entre os candidatos elegíveis, escolhe primeiro quem tem DATA PLANEJADA mais próxima
+      do dia atual (menor antecipação)
     """
 
     resultado = {}
@@ -254,69 +253,73 @@ def aplicar_cenario1(df_mes, dias, capacidade):
 
     dias = [pd.to_datetime(d).normalize() for d in dias]
 
-    # -------------------------------------------------
-    # Separar filas por MODELO mantendo FIFO
-    # -------------------------------------------------
-    por_modelo = {}
+    # Filas por modelo em FIFO
+    filas_modelo = {}
     for modelo, grupo in df_mes.groupby("MODELO"):
         filas = grupo.sort_values(["DATA PLANEJADA", "NR_FILA"]).copy()
-        por_modelo[modelo] = filas.index.tolist()
+        filas_modelo[modelo] = filas.index.tolist()
 
-    # Função auxiliar: retorna o último índice ainda disponível do modelo
-    # cuja DATA PLANEJADA seja >= dia atual
-    def ultimo_elegivel_do_modelo(modelo, dia_atual):
-        idxs = por_modelo.get(modelo, [])
-        if not idxs:
+    # Controle de ponteiro por modelo
+    ponteiro_modelo = {modelo: 0 for modelo in filas_modelo.keys()}
+
+    # Função para pegar o próximo item elegível do modelo
+    def proximo_item_modelo(modelo):
+        idxs = filas_modelo[modelo]
+        pos = ponteiro_modelo[modelo]
+
+        if pos >= len(idxs):
             return None
 
-        # procura do fim para o começo
-        for idx in reversed(idxs):
-            data_idx = pd.to_datetime(df_mes.loc[idx, "DATA PLANEJADA"], errors="coerce")
-            if pd.notna(data_idx) and data_idx.normalize() >= dia_atual:
-                return idx
+        idx = idxs[pos]
+        row = df_mes.loc[idx]
 
-        return None
+        data_planejada = pd.to_datetime(row["DATA PLANEJADA"], errors="coerce")
+        if pd.isna(data_planejada):
+            return None
 
-    # -------------------------------------------------
-    # Preenche o calendário de trás para frente
-    # -------------------------------------------------
-    for dia in reversed(dias):
+        return {
+            "idx": idx,
+            "modelo": modelo,
+            "data_planejada": data_planejada.normalize(),
+            "nr_fila": row["NR_FILA"]
+        }
+
+    # Preenche dia a dia
+    for dia in dias:
         alocados_no_dia = 0
 
         while alocados_no_dia < capacidade:
             candidatos = []
 
-            # pega 1 candidato por modelo (o último elegível)
-            for modelo in por_modelo.keys():
-                idx = ultimo_elegivel_do_modelo(modelo, dia)
-                if idx is not None:
-                    data_planejada = pd.to_datetime(df_mes.loc[idx, "DATA PLANEJADA"], errors="coerce").normalize()
-                    nr_fila = df_mes.loc[idx, "NR_FILA"]
-                    candidatos.append((idx, modelo, data_planejada, nr_fila))
+            for modelo in filas_modelo.keys():
+                item = proximo_item_modelo(modelo)
+                if item is None:
+                    continue
 
-            # se não houver mais candidatos, para o dia
+                # só pode antecipar ou manter: data planejada >= dia
+                if item["data_planejada"] >= dia:
+                    candidatos.append(item)
+
+            # não há mais ninguém elegível para este dia
             if not candidatos:
                 break
 
-            # -------------------------------------------------
-            # Critério de escolha:
-            # 1) maior DATA PLANEJADA (para minimizar antecipação)
-            # 2) maior NR_FILA como desempate
-            # -------------------------------------------------
+            # prioridade:
+            # 1) menor antecipação possível -> menor DATA PLANEJADA >= dia
+            # 2) menor NR_FILA
+            # 3) nome do modelo como critério estável
             candidatos = sorted(
                 candidatos,
-                key=lambda x: (x[2], x[3]),
-                reverse=True
+                key=lambda x: (x["data_planejada"], x["nr_fila"], str(x["modelo"]))
             )
 
-            idx_escolhido, modelo_escolhido, _, _ = candidatos[0]
+            escolhido = candidatos[0]
 
-            # aloca no dia atual
-            resultado[idx_escolhido] = dia
+            resultado[escolhido["idx"]] = dia
             alocados_no_dia += 1
 
-            # remove da fila do modelo
-            por_modelo[modelo_escolhido].remove(idx_escolhido)
+            # avança o ponteiro do modelo escolhido
+            ponteiro_modelo[escolhido["modelo"]] += 1
 
     return resultado
 
