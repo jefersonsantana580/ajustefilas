@@ -230,48 +230,65 @@ def balancear_dia_por_modelo(df_pend, capacidade_dia):
 # Cenário 1 – FIFO por MODELO (antecipação mínima)
 # =====================================================
 
+
 def aplicar_cenario1(df_mes, dias, capacidade):
     """
     Cenário 1:
     - FIFO por MODELO
-    - Antecipação mínima
-    - Nivelamento apenas quando necessário
+    - antecipação mínima
+    - respeita a capacidade diária como meta
+    - tenta preencher os dias até o limite antes de avançar
     """
+
     resultado = {}
 
     if not dias:
         return resultado
 
+    dias = [pd.to_datetime(d).normalize() for d in dias]
     ocupacao_dia = {d: 0 for d in dias}
 
-    for modelo, grupo in df_mes.groupby("MODELO"):
-        filas = grupo.sort_values(["DATA PLANEJADA", "NR_FILA"])
+    # -------------------------------------------------
+    # Ordena globalmente, mas preservando FIFO por modelo
+    # -------------------------------------------------
+    df_ord = df_mes.sort_values(["DATA PLANEJADA", "MODELO", "NR_FILA"]).copy()
 
-        for idx, row in filas.iterrows():
-            d = row["DATA PLANEJADA"]
+    for idx, row in df_ord.iterrows():
+        data_planejada = pd.to_datetime(row["DATA PLANEJADA"], errors="coerce")
 
-            if pd.isna(d):
+        if pd.isna(data_planejada):
+            continue
+
+        data_planejada = data_planejada.normalize()
+
+        # Dias elegíveis = todos os dias úteis <= data planejada
+        dias_elegiveis = [d for d in dias if d <= data_planejada]
+
+        # Se não houver nenhum dia <= data planejada, usa o primeiro dia útil do mês
+        if not dias_elegiveis:
+            dias_elegiveis = [dias[0]]
+
+        # Procura o dia mais próximo possível da data planejada, voltando só se necessário
+        dia_escolhido = None
+        for d in reversed(dias_elegiveis):
+            if ocupacao_dia[d] < capacidade:
+                dia_escolhido = d
+                break
+
+        # Se não encontrou vaga antes ou no dia planejado,
+        # usa o dia com menor ocupação (fallback de segurança)
+        if dia_escolhido is None:
+            dias_com_vaga = [d for d in dias if ocupacao_dia[d] < capacidade]
+            if dias_com_vaga:
+                dia_escolhido = min(dias_com_vaga, key=lambda x: (ocupacao_dia[x], x))
+            else:
                 continue
 
-            d = pd.to_datetime(d).normalize()
-
-            if d not in ocupacao_dia:
-                dias_validos = [x for x in dias if x <= d]
-                if dias_validos:
-                    d = max(dias_validos)
-                else:
-                    d = dias[0]
-
-            while ocupacao_dia[d] >= capacidade:
-                prev_days = [x for x in dias if x < d]
-                if not prev_days:
-                    break
-                d = prev_days[-1]
-
-            resultado[idx] = d
-            ocupacao_dia[d] += 1
+        resultado[idx] = dia_escolhido
+        ocupacao_dia[dia_escolhido] += 1
 
     return resultado
+
 
 # =====================================================
 # Cenário 2 – FIFO global + balanceamento por MODELO
