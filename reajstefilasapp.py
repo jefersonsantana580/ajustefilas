@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 Nivelamento de Filas - Cenários 1, 2 e 3
@@ -20,10 +21,9 @@ st.set_page_config(page_title="Nivelamento de Filas", layout="wide")
 st.title("📊 Nivelamento de Filas – Cenários 1, 2 e 3")
 
 # =====================================================
-# Parâmetros fixos internos
+# Parâmetro interno fixo
 # =====================================================
 
-# O usuário não precisa ver isso na tela
 JANELA_ESPALHAMENTO_C3 = 2
 
 # =====================================================
@@ -151,7 +151,6 @@ def distancia_em_dias_uteis(data_alvo, data_candidata, ordem_dias):
     if data_alvo in ordem_dias:
         return abs(ordem_dias[data_candidata] - ordem_dias[data_alvo])
 
-    # se a data alvo não for dia útil, compara com o dia útil mais próximo
     mais_proximo = min(ordem_dias.keys(), key=lambda d: abs((d - data_alvo).days))
     return abs(ordem_dias[data_candidata] - ordem_dias[mais_proximo])
 
@@ -363,10 +362,9 @@ def aplicar_cenario3(df_mes, dias, capacidade, janela_espalhamento=2):
     - Sempre respeita a capacidade diária
     """
     resultado = {}
-    alertas = []
 
     if not dias:
-        return resultado, alertas
+        return resultado
 
     dias = [pd.to_datetime(d).normalize() for d in dias]
     ocupacao = {d: 0 for d in dias}
@@ -403,14 +401,6 @@ def aplicar_cenario3(df_mes, dias, capacidade, janela_espalhamento=2):
             ocupacao[melhor_dia] += 1
             uso_modelo_dia[(modelo, melhor_dia)] = uso_modelo_dia.get((modelo, melhor_dia), 0) + 1
 
-            data_original_norm = data_original.normalize() if pd.notna(data_original) else None
-            if data_original_norm is not None and melhor_dia != data_original_norm:
-                alertas.append(
-                    f"NR_FILA {row['NR_FILA']} (MODELO {modelo}) ajustada de "
-                    f"{data_original_norm.strftime('%d/%m/%Y')} para "
-                    f"{melhor_dia.strftime('%d/%m/%Y')} para reduzir acúmulo e manter proximidade."
-                )
-
     # 2) Aloca modelos pesados nas vagas restantes
     pend = df_pesados.copy()
 
@@ -433,7 +423,7 @@ def aplicar_cenario3(df_mes, dias, capacidade, janela_espalhamento=2):
 
         pend = pend.drop(index=escolhidos)
 
-    return resultado, alertas
+    return resultado
 
 # =====================================================
 # Geração do nivelamento
@@ -445,7 +435,6 @@ if uploaded and st.button("🚀 Gerar Nivelamento"):
     # Limpa resultados anteriores para evitar conflito de session_state antigo
     st.session_state.pop("df_resultado", None)
     st.session_state.pop("col_mes_offline", None)
-    st.session_state.pop("alertas_c3", None)
 
     # Valida colunas mínimas
     colunas_obrigatorias = ["DATA PLANEJADA", "MODELO", "NR_FILA"]
@@ -472,7 +461,6 @@ if uploaded and st.button("🚀 Gerar Nivelamento"):
     feriados = parse_feriados(feriados_text)
 
     res_c1, res_c2, res_c3 = {}, {}, {}
-    alertas_c3 = []
 
     # Nivelamento por mês da DATA PLANEJADA
     for mes, df_mes in df.groupby(df["DATA PLANEJADA"].dt.to_period("M")):
@@ -483,15 +471,14 @@ if uploaded and st.button("🚀 Gerar Nivelamento"):
 
         res_c1.update(aplicar_cenario1(df_mes, dias, capacidade_por_dia))
         res_c2.update(aplicar_cenario2(df_mes, dias, capacidade_por_dia))
-
-        res_mes_c3, alertas_mes_c3 = aplicar_cenario3(
-            df_mes=df_mes,
-            dias=dias,
-            capacidade=capacidade_por_dia,
-            janela_espalhamento=JANELA_ESPALHAMENTO_C3
+        res_c3.update(
+            aplicar_cenario3(
+                df_mes=df_mes,
+                dias=dias,
+                capacidade=capacidade_por_dia,
+                janela_espalhamento=JANELA_ESPALHAMENTO_C3
+            )
         )
-        res_c3.update(res_mes_c3)
-        alertas_c3.extend(alertas_mes_c3)
 
     # Garante colunas antes de preencher
     df = garantir_colunas_resultado(df)
@@ -518,7 +505,6 @@ if uploaded and st.button("🚀 Gerar Nivelamento"):
     # Salva no estado
     st.session_state["df_resultado"] = df.copy()
     st.session_state["col_mes_offline"] = col_mes_offline
-    st.session_state["alertas_c3"] = alertas_c3
 
     st.success("✅ Cenários 1, 2 e 3 gerados corretamente")
 
@@ -530,7 +516,6 @@ if "df_resultado" in st.session_state:
     df_resultado = st.session_state["df_resultado"].copy()
     col_mes_offline = st.session_state.get("col_mes_offline")
 
-    # Se não tiver coluna de mês, não tenta exibir filtro
     if col_mes_offline is None or col_mes_offline not in df_resultado.columns:
         st.warning("⚠️ Resultado disponível, mas a coluna de mês offline não foi encontrada.")
         st.stop()
@@ -579,19 +564,6 @@ if "df_resultado" in st.session_state:
     c1.metric("Total de filas", len(df_filtrado))
     c2.metric("Modelos únicos", df_filtrado["MODELO"].nunique() if "MODELO" in df_filtrado.columns else 0)
     c3.metric("Capacidade por dia", capacidade_por_dia)
-
-    # =====================================================
-    # Alertas do Cenário 3
-    # =====================================================
-
-    if "alertas_c3" in st.session_state and st.session_state["alertas_c3"]:
-        with st.expander("⚠️ Ajustes realizados no Cenário 3"):
-            st.write(
-                "Essas linhas são de modelos leves que foram mantidas próximas da DATA PLANEJADA, "
-                "mas precisaram ser espalhadas para evitar acúmulo no mesmo dia."
-            )
-            for msg in st.session_state["alertas_c3"]:
-                st.write("- " + msg)
 
     # =====================================================
     # Formatação somente para exibição
