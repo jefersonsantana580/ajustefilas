@@ -129,8 +129,6 @@ def ajustar_para_dia_util(data, dias):
 
     return pd.NaT
 
-
-
 def encontrar_coluna_mes(df):
     """
     Tenta localizar a coluna MES OFFLINE mesmo que o nome esteja diferente.
@@ -262,15 +260,14 @@ def balancear_dia_por_modelo(df_pend, capacidade_dia):
 # Cenário 1 – FIFO por MODELO (antecipação mínima)
 # =====================================================
 
-
 def aplicar_cenario1(df_mes, dias, capacidade):
     """
     Cenário 1:
     - FIFO por MODELO
-    - preserva a DATA PLANEJADA original sempre que houver capacidade
-    - se o dia estiver cheio, antecipa para o dia útil anterior mais próximo
+    - tenta manter a DATA PLANEJADA original
+    - se o dia ficar acima da capacidade, antecipa o excedente
+    - depois faz backfill para preencher os dias até a capacidade
     - trata feriado/fim de semana
-    - evita datas vazias com fallback final
     """
 
     resultado = {}
@@ -281,19 +278,40 @@ def aplicar_cenario1(df_mes, dias, capacidade):
     dias = sorted(pd.to_datetime(d).normalize() for d in dias)
     ocupacao = {d: 0 for d in dias}
 
-    # Ajusta a data planejada para um dia útil válido
+    # Ajusta DATA PLANEJADA para um dia útil válido
     df_trab = df_mes.copy()
     df_trab["DATA_REFERENCIA_C1"] = df_trab["DATA PLANEJADA"].apply(
         lambda x: ajustar_para_dia_util(x, dias)
     )
 
-    # Ordena globalmente por data, mas preservando FIFO por modelo
+    # Ordena por modelo + FIFO
     df_trab = df_trab.sort_values(["MODELO", "DATA_REFERENCIA_C1", "NR_FILA"]).copy()
 
-    # Guarda o último dia alocado por modelo para respeitar FIFO
-    ultimo_dia_modelo = {}
+    # =====================================================
+    # 1ª PASSADA: tenta manter na data original
+    # =====================================================
+    pendentes = []
 
     for idx, row in df_trab.iterrows():
+        data_ref = pd.to_datetime(row["DATA_REFERENCIA_C1"], errors="coerce")
+
+        if pd.isna(data_ref):
+            pendentes.append(idx)
+            continue
+
+        data_ref = data_ref.normalize()
+
+        if ocupacao[data_ref] < capacidade:
+            resultado[idx] = data_ref
+            ocupacao[data_ref] += 1
+        else:
+            pendentes.append(idx)
+
+    # =====================================================
+    # 2ª PASSADA: para os pendentes, tenta antecipar o mínimo possível
+    # =====================================================
+    for idx in pendentes:
+        row = df_trab.loc[idx]
         modelo = row["MODELO"]
         data_ref = pd.to_datetime(row["DATA_REFERENCIA_C1"], errors="coerce")
 
@@ -302,48 +320,66 @@ def aplicar_cenario1(df_mes, dias, capacidade):
 
         data_ref = data_ref.normalize()
 
-        # Limite mínimo para respeitar FIFO dentro do modelo
-        limite_inferior = ultimo_dia_modelo.get(modelo, dias[0])
+        # Para respeitar FIFO dentro do modelo:
+        # encontra a última data já usada pelo modelo
+        datas_modelo = [
+            resultado[i] for i in resultado
+            if df_trab.loc[i, "MODELO"] == modelo
+        ]
+        limite_inferior = max(datas_modelo) if datas_modelo else dias[0]
 
-        # -------------------------------------------------
-        # 1) tenta manter no próprio dia original
-        # -------------------------------------------------
-        if data_ref >= limite_inferior and ocupacao.get(data_ref, 0) < capacidade:
-            dia_escolhido = data_ref
+        # Tenta do dia original para trás (antecipação mínima)
+        candidatos = [
+            d for d in dias
+            if limite_inferior <= d <= data_ref and ocupacao[d] < capacidade
+        ]
 
+        if candidatos:
+            dia_escolhido = candidatos[-1]  # mais próximo da data original
+            resultado[idx] = dia_escolhido
+            ocupacao[dia_escolhido] += 1
         else:
-            # -------------------------------------------------
-            # 2) tenta antecipar o mínimo possível
-            #    procura o dia útil anterior mais próximo
-            # -------------------------------------------------
-            candidatos_anteriores = [
+            # fallback: se não houver vaga antes, tenta para frente
+            futuros = [
                 d for d in dias
-                if limite_inferior <= d <= data_ref and ocupacao[d] < capacidade
+                if d >= limite_inferior and ocupacao[d] < capacidade
             ]
+            if futuros:
+                dia_escolhido = futuros[0]
+                resultado[idx] = dia_escolhido
+                ocupacao[dia_escolhido] += 1
 
-            if candidatos_anteriores:
-                dia_escolhido = candidatos_anteriores[-1]  # mais próximo da data original
-            else:
-                # -------------------------------------------------
-                # 3) fallback de segurança: se não der para manter nem antecipar,
-                #    usa o próximo dia útil disponível >= limite_inferior
-                # -------------------------------------------------
-                candidatos_futuros = [
-                    d for d in dias
-                    if d >= limite_inferior and ocupacao[d] < capacidade
-                ]
+    # =====================================================
+    # 3ª PASSADA: backfill para preencher os dias até a capacidade
+    # =====================================================
+    alocados = set(resultado.keys())
+    restantes = df_trab.loc[~df_trab.index.isin(alocados)].copy()
 
-                if not candidatos_futuros:
-                    continue
+    if not restantes.empty:
+        restantes = restantes.sort_values(["DATA_REFERENCIA_C1", "NR_FILA"])
 
-                dia_escolhido = candidatos_futuros[0]
+        for dia in dias:
+            while ocupacao[dia] < capacidade and not restantes.empty:
+                # pega o item mais próximo possível do dia atual, mas futuro
+                candidatos = restantes[
+                    pd.to_datetime(restantes["DATA_REFERENCIA_C1"], errors="coerce").dt.normalize() >= dia
+                ].copy()
 
-        resultado[idx] = dia_escolhido
-        ocupacao[dia_escolhido] += 1
-        ultimo_dia_modelo[modelo] = dia_escolhido
+                if candidatos.empty:
+                    break
+
+                candidatos["DIST"] = (
+                    pd.to_datetime(candidatos["DATA_REFERENCIA_C1"], errors="coerce").dt.normalize() - dia
+                ).dt.days
+
+                candidatos = candidatos.sort_values(["DIST", "DATA_REFERENCIA_C1", "NR_FILA"])
+                idx_escolhido = candidatos.index[0]
+
+                resultado[idx_escolhido] = dia
+                ocupacao[dia] += 1
+                restantes = restantes.drop(index=idx_escolhido)
 
     return resultado
-
 
 
 # =====================================================
