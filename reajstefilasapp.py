@@ -97,6 +97,37 @@ def dias_uteis_mes(datas, feriados):
     ]
     return dias
 
+def ajustar_para_dia_util(data, dias):
+    """
+    mês.
+    Regras:
+    - se a data já for dia útil válido, mantém;
+    - se cair em feriado/fim de semana, empurra para o próximo dia útil;
+    - se não houver próximo, usa o último anterior.
+    """
+    if pd.isna(data) or not dias:
+        return pd.NaT
+
+    data = pd.to_datetime(data, errors="coerce")
+    if pd.isna(data):
+        return pd.NaT
+
+    data = data.normalize()
+    dias = sorted(pd.to_datetime(d).normalize() for d in dias)
+
+    if data in dias:
+        return data
+
+    futuros = [d for d in dias if d >= data]
+    if futuros:
+        return futuros[0]
+
+    anteriores = [d for d in dias if d <= data]
+    if anteriores:
+        return anteriores[-1]
+
+    return pd.NaT
+
 
 def encontrar_coluna_mes(df):
     """
@@ -230,19 +261,13 @@ def balancear_dia_por_modelo(df_pend, capacidade_dia):
 # =====================================================
 
 
-def aplicar_cenario1(df_mes, dias, capacidade):
-    """
+def aplicar_cenario1(df_mes, dias, capacidade):def aplicar_cenario1(df_mes    """
     Cenário 1:
     - FIFO por MODELO
     - antecipação mínima
-    - usa a capacidade diária como meta de preenchimento
-    - preenche os dias desde o início do mês
-
-    Regra:
-    - Em cada dia, só pode ser escolhido o PRIMEIRO item ainda não alocado de cada MODELO
-      (isso preserva o FIFO por MODELO)
-    - Entre os candidatos elegíveis, escolhe primeiro quem tem DATA PLANEJADA mais próxima
-      do dia atual (menor antecipação)
+    - usa a capacidade diária como meta
+    - trata datas planejadas em feriado/fim de semana
+    - evita deixar linhas sem data por causa de ponteiro preso
     """
 
     resultado = {}
@@ -252,36 +277,46 @@ def aplicar_cenario1(df_mes, dias, capacidade):
 
     dias = [pd.to_datetime(d).normalize() for d in dias]
 
+    # Cria uma data de referência válida para o cenário 1
+    df_trab = df_mes.copy()
+    df_trab["DATA_REFERENCIA_C1"] = df_trab["DATA PLANEJADA"].apply(
+        lambda x: ajustar_para_dia_util(x, dias)
+    )
+
     # Filas por modelo em FIFO
     filas_modelo = {}
-    for modelo, grupo in df_mes.groupby("MODELO"):
-        filas = grupo.sort_values(["DATA PLANEJADA", "NR_FILA"]).copy()
+    for modelo, grupo in df_trab.groupby("MODELO"):
+        filas = grupo.sort_values(["DATA_REFERENCIA_C1", "NR_FILA"]).copy()
         filas_modelo[modelo] = filas.index.tolist()
 
-    # Controle de ponteiro por modelo
     ponteiro_modelo = {modelo: 0 for modelo in filas_modelo.keys()}
 
-    # Função para pegar o próximo item elegível do modelo
     def proximo_item_modelo(modelo):
+        """
+        Retorna o próximo item válido do modelo.
+        Se encontrar linha com DATA_REFERENCIA_C1 inválida, avança o ponteiro.
+        """
         idxs = filas_modelo[modelo]
         pos = ponteiro_modelo[modelo]
 
-        if pos >= len(idxs):
-            return None
+        while pos < len(idxs):
+            idx = idxs[pos]
+            row = df_trab.loc[idx]
 
-        idx = idxs[pos]
-        row = df_mes.loc[idx]
+            data_ref = pd.to_datetime(row["DATA_REFERENCIA_C1"], errors="coerce")
+            if pd.notna(data_ref):
+                return {
+                    "idx": idx,
+                    "modelo": modelo,
+                    "data_planejada": data_ref.normalize(),
+                    "nr_fila": row["NR_FILA"]
+                }
 
-        data_planejada = pd.to_datetime(row["DATA PLANEJADA"], errors="coerce")
-        if pd.isna(data_planejada):
-            return None
+            # se a data for inválida, pula para a próxima linha do mesmo modelo
+            pos += 1
+            ponteiro_modelo[modelo] = pos
 
-        return {
-            "idx": idx,
-            "modelo": modelo,
-            "data_planejada": data_planejada.normalize(),
-            "nr_fila": row["NR_FILA"]
-        }
+        return None
 
     # Preenche dia a dia
     for dia in dias:
@@ -295,7 +330,7 @@ def aplicar_cenario1(df_mes, dias, capacidade):
                 if item is None:
                     continue
 
-                # só pode antecipar ou manter: data planejada >= dia
+                # só pode antecipar ou manter
                 if item["data_planejada"] >= dia:
                     candidatos.append(item)
 
@@ -304,7 +339,7 @@ def aplicar_cenario1(df_mes, dias, capacidade):
                 break
 
             # prioridade:
-            # 1) menor antecipação possível -> menor DATA PLANEJADA >= dia
+            # 1) menor antecipação possível -> menor DATA_REFERENCIA_C1 >= dia
             # 2) menor NR_FILA
             # 3) nome do modelo como critério estável
             candidatos = sorted(
